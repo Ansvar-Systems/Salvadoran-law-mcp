@@ -1,17 +1,13 @@
 #!/usr/bin/env tsx
 /**
- * Dominican Republic Law MCP -- Census Script
+ * Salvadoran Law MCP -- Census Script
  *
- * Scrapes consultoria.gov.do to enumerate ALL laws.
- * Uses the ASP.NET MVC search form with CSRF token protection.
+ * Scrapes el-salvador.justia.com/nacionales/leyes/ to enumerate Salvadoran laws.
+ * Justia provides a reliable, structured index of Salvadoran legislation
+ * with links to full-text HTML pages.
  *
- * Pipeline:
- *   1. GET the main page to obtain session cookie + CSRF token
- *   2. POST search with DocumentTypeCode=1 (Leyes) to get all laws
- *   3. Parse HTML table response for law entries
- *   4. Write data/census.json
- *
- * Source: https://www.consultoria.gov.do/consulta/
+ * Source: https://el-salvador.justia.com/nacionales/leyes/
+ * Language: Spanish (civil law)
  *
  * Usage:
  *   npx tsx scripts/census.ts
@@ -28,179 +24,155 @@ const __dirname = path.dirname(__filename);
 const DATA_DIR = path.resolve(__dirname, '../data');
 const CENSUS_PATH = path.join(DATA_DIR, 'census.json');
 
-const BASE_URL = 'https://www.consultoria.gov.do';
-const MAIN_URL = `${BASE_URL}/consulta/`;
-const SEARCH_URL = `${BASE_URL}/Consulta/Home/Search?Length=7`;
+const BASE_URL = 'https://el-salvador.justia.com';
+const LAWS_INDEX = `${BASE_URL}/nacionales/leyes/`;
 
-const USER_AGENT = 'dominican-law-mcp/1.0 (census; https://github.com/Ansvar-Systems/dominican-law-mcp)';
+const USER_AGENT = 'salvadoran-law-mcp/1.0 (https://github.com/Ansvar-Systems/salvadoran-law-mcp; hello@ansvar.ai)';
+const MIN_DELAY_MS = 500;
 
 /* ---------- Types ---------- */
 
 interface RawLawEntry {
-  tipo: string;
-  numero: string;
-  titulo: string;
-  gaceta: string;
-  fecha: string;
-  documentId: string;
-  downloadUrl: string;
+  title: string;
+  url: string;
+  year: string;
+  normType: string;
 }
 
-/* ---------- HTTP Helpers ---------- */
+/* ---------- HTTP ---------- */
 
-/**
- * Fetch the main page to get session cookies and CSRF token.
- */
-async function getSessionAndToken(): Promise<{ cookies: string; token: string }> {
-  const response = await fetch(MAIN_URL, {
-    headers: {
-      'User-Agent': USER_AGENT,
-      'Accept': 'text/html',
-    },
-    redirect: 'follow',
-  });
+async function fetchPage(url: string): Promise<string | null> {
+  await new Promise(resolve => setTimeout(resolve, MIN_DELAY_MS));
 
-  if (response.status !== 200) {
-    throw new Error(`Failed to load main page: HTTP ${response.status}`);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30000);
+
+  try {
+    const response = await fetch(url, {
+      headers: {
+        'User-Agent': USER_AGENT,
+        'Accept': 'text/html, */*',
+        'Accept-Language': 'es,en;q=0.5',
+      },
+      redirect: 'follow',
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeout);
+    if (response.status !== 200) {
+      console.log(`  HTTP ${response.status} for ${url}`);
+      return null;
+    }
+    return response.text();
+  } catch (err) {
+    clearTimeout(timeout);
+    console.log(`  Error: ${err instanceof Error ? err.message : String(err)}`);
+    return null;
   }
-
-  // Extract cookies from response
-  const setCookies = response.headers.getSetCookie?.() ?? [];
-  const cookieHeader = setCookies
-    .map(c => c.split(';')[0])
-    .join('; ');
-
-  const html = await response.text();
-
-  // Extract CSRF token
-  const tokenMatch = html.match(/name="__RequestVerificationToken"[^>]*value="([^"]*)"/);
-  if (!tokenMatch) {
-    throw new Error('Failed to extract CSRF token from main page');
-  }
-
-  return { cookies: cookieHeader, token: tokenMatch[1] };
-}
-
-/**
- * Search for all laws using the ASP.NET MVC form.
- */
-async function searchLaws(cookies: string, token: string): Promise<string> {
-  const body = new URLSearchParams({
-    __RequestVerificationToken: token,
-    DocumentTypeCode: '1', // Leyes
-    DocumentCategory: '0',
-  });
-
-  const response = await fetch(SEARCH_URL, {
-    method: 'POST',
-    headers: {
-      'User-Agent': USER_AGENT,
-      'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-      'X-Requested-With': 'XMLHttpRequest',
-      'Accept': '*/*',
-      'Origin': BASE_URL,
-      'Referer': MAIN_URL,
-      'Cookie': cookies,
-    },
-    body: body.toString(),
-    redirect: 'follow',
-  });
-
-  if (response.status !== 200) {
-    throw new Error(`Search request failed: HTTP ${response.status}`);
-  }
-
-  return response.text();
 }
 
 /* ---------- Parsing ---------- */
 
-function parseSearchResults(html: string): RawLawEntry[] {
-  const entries: RawLawEntry[] = [];
+function stripHtml(html: string): string {
+  return html.replace(/<[^>]*>/g, '').trim();
+}
 
-  // Match table rows with 6 cells
-  const rowRe = /<tr>\s*<td[^>]*>([\s\S]*?)<\/td>\s*<td[^>]*>([\s\S]*?)<\/td>\s*<td[^>]*>([\s\S]*?)<\/td>\s*<td[^>]*>([\s\S]*?)<\/td>\s*<td[^>]*>([\s\S]*?)<\/td>\s*<td[^>]*>([\s\S]*?)<\/td>\s*<\/tr>/gi;
+function decodeHtmlEntities(text: string): string {
+  return text
+    .replace(/&aacute;/gi, '\u00e1').replace(/&eacute;/gi, '\u00e9')
+    .replace(/&iacute;/gi, '\u00ed').replace(/&oacute;/gi, '\u00f3')
+    .replace(/&uacute;/gi, '\u00fa').replace(/&ntilde;/gi, '\u00f1')
+    .replace(/&Aacute;/gi, '\u00c1').replace(/&Eacute;/gi, '\u00c9')
+    .replace(/&Iacute;/gi, '\u00cd').replace(/&Oacute;/gi, '\u00d3')
+    .replace(/&Uacute;/gi, '\u00da').replace(/&Ntilde;/gi, '\u00d1')
+    .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"')
+    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(parseInt(n)));
+}
+
+function slugify(text: string): string {
+  return text.toLowerCase().normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '').substring(0, 60);
+}
+
+function classifyNormType(title: string): string {
+  const t = title.toLowerCase();
+  if (/\bdecreto[\s-]*legislativo\b/.test(t)) return 'decreto-legislativo';
+  if (/\bdecreto[\s-]*ley\b/.test(t)) return 'decreto-ley';
+  if (/\bconstituci[\u00f3o]n\b/.test(t)) return 'constitucion';
+  if (/\bc[\u00f3o]digo\b/.test(t)) return 'codigo';
+  if (/\bley\b/.test(t)) return 'ley';
+  if (/\bdecreto\b/.test(t)) return 'decreto';
+  if (/\bacuerdo\b/.test(t)) return 'acuerdo';
+  if (/\bresoluci[\u00f3o]n\b/.test(t)) return 'resolucion';
+  return 'other';
+}
+
+function extractYear(text: string): string {
+  const match = text.match(/\b(19\d{2}|20[0-2]\d)\b/);
+  return match ? match[1] : '';
+}
+
+function parseLawIndex(html: string): RawLawEntry[] {
+  const entries: RawLawEntry[] = [];
+  const seen = new Set<string>();
+
+  const linkRe = /<a\s+[^>]*href="([^"]*\/nacionales\/leyes\/[^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
   let match: RegExpExecArray | null;
 
-  while ((match = rowRe.exec(html)) !== null) {
-    const tipo = stripTags(match[1]).trim();
-    const numero = stripTags(match[2]).trim();
-    const titulo = decodeEntities(stripTags(match[3]).trim());
-    const gaceta = stripTags(match[4]).trim();
-    const fecha = stripTags(match[5]).trim();
-    const opciones = match[6];
+  while ((match = linkRe.exec(html)) !== null) {
+    let href = match[1];
+    const rawTitle = stripHtml(match[2]).trim();
 
-    // Extract documentId from link
-    const docIdMatch = opciones.match(/documentId=(\d+)/);
-    const documentId = docIdMatch ? docIdMatch[1] : '';
+    if (!rawTitle || rawTitle.length < 3) continue;
+    if (/^(ver|m\u00e1s|siguiente|anterior|inicio)$/i.test(rawTitle)) continue;
 
-    if (documentId && titulo) {
-      entries.push({
-        tipo,
-        numero,
-        titulo,
-        gaceta,
-        fecha,
-        documentId,
-        downloadUrl: `${BASE_URL}/Consulta/Home/FileManagement?documentId=${documentId}&managementType=1`,
-      });
+    if (!href.startsWith('http')) {
+      href = `${BASE_URL}${href.startsWith('/') ? '' : '/'}${href}`;
     }
+
+    if (href === LAWS_INDEX || href === `${LAWS_INDEX}/`) continue;
+    if (seen.has(href)) continue;
+    seen.add(href);
+
+    const title = decodeHtmlEntities(rawTitle);
+    entries.push({ title, url: href, year: extractYear(title) || extractYear(href), normType: classifyNormType(title) });
   }
 
   return entries;
 }
 
-function stripTags(text: string): string {
-  return text.replace(/<[^>]*>/g, '');
-}
+function extractSubPages(html: string): string[] {
+  const pages: string[] = [];
+  const seen = new Set<string>();
 
-function decodeEntities(text: string): string {
-  return text
-    .replace(/&#209;/g, 'Ñ').replace(/&#241;/g, 'ñ')
-    .replace(/&#193;/g, 'Á').replace(/&#225;/g, 'á')
-    .replace(/&#201;/g, 'É').replace(/&#233;/g, 'é')
-    .replace(/&#205;/g, 'Í').replace(/&#237;/g, 'í')
-    .replace(/&#211;/g, 'Ó').replace(/&#243;/g, 'ó')
-    .replace(/&#218;/g, 'Ú').replace(/&#250;/g, 'ú')
-    .replace(/&#252;/g, 'ü').replace(/&#220;/g, 'Ü')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(parseInt(n)));
-}
-
-function slugify(text: string): string {
-  return text
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .substring(0, 50);
-}
-
-function parseDRDate(dateStr: string): string {
-  // Format: "30/09/1920"
-  const match = dateStr.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
-  if (match) {
-    const [, day, month, year] = match;
-    return `${year}-${month!.padStart(2, '0')}-${day!.padStart(2, '0')}`;
+  // Year-based sub-pages
+  const yearRe = /<a\s+[^>]*href="([^"]*\/nacionales\/leyes\/\d{4}\/[^"]*)"[^>]*>/gi;
+  let match: RegExpExecArray | null;
+  while ((match = yearRe.exec(html)) !== null) {
+    let href = match[1];
+    if (!href.startsWith('http')) href = `${BASE_URL}${href.startsWith('/') ? '' : '/'}${href}`;
+    if (!seen.has(href)) { seen.add(href); pages.push(href); }
   }
-  return '';
+
+  // Pagination
+  const pageRe = /href="([^"]*\?page=\d+[^"]*)"/gi;
+  while ((match = pageRe.exec(html)) !== null) {
+    let href = match[1];
+    if (!href.startsWith('http')) href = `${BASE_URL}${href.startsWith('/') ? '' : '/'}${href}`;
+    if (!seen.has(href)) { seen.add(href); pages.push(href); }
+  }
+
+  return pages;
 }
 
 function parseArgs(): { limit: number | null } {
   const args = process.argv.slice(2);
   let limit: number | null = null;
-
   for (let i = 0; i < args.length; i++) {
-    if (args[i] === '--limit' && args[i + 1]) {
-      limit = parseInt(args[i + 1], 10);
-      i++;
-    }
+    if (args[i] === '--limit' && args[i + 1]) { limit = parseInt(args[i + 1], 10); i++; }
   }
-
   return { limit };
 }
 
@@ -209,71 +181,82 @@ function parseArgs(): { limit: number | null } {
 async function main(): Promise<void> {
   const { limit } = parseArgs();
 
-  console.log('Dominican Republic Law MCP -- Census');
-  console.log('=====================================\n');
-  console.log('  Source: consultoria.gov.do/consulta/');
-  console.log('  Method: ASP.NET MVC search form (POST with CSRF token)');
+  console.log('Salvadoran Law MCP -- Census');
+  console.log('============================\n');
+  console.log('  Source: el-salvador.justia.com/nacionales/leyes/');
+  console.log('  Language: Spanish (civil law)');
   if (limit) console.log(`  --limit ${limit}`);
   console.log('');
 
   fs.mkdirSync(DATA_DIR, { recursive: true });
 
-  // Step 1: Get session + CSRF token
-  process.stdout.write('  Getting session and CSRF token... ');
-  const { cookies, token } = await getSessionAndToken();
-  console.log('OK');
+  console.log('  Step 1: Fetching main law index...');
+  const mainHtml = await fetchPage(LAWS_INDEX);
 
-  // Step 2: Search for all laws
-  process.stdout.write('  Searching for all laws (DocumentTypeCode=1)... ');
-  const searchHtml = await searchLaws(cookies, token);
-  console.log(`OK (${(searchHtml.length / 1024).toFixed(0)} KB response)`);
+  if (!mainHtml) {
+    console.error('  ERROR: Could not fetch main index page');
+    process.exit(1);
+  }
 
-  // Step 3: Parse results
-  process.stdout.write('  Parsing search results... ');
-  const rawEntries = parseSearchResults(searchHtml);
-  console.log(`${rawEntries.length} laws found`);
+  const allEntries: RawLawEntry[] = [];
+  const mainEntries = parseLawIndex(mainHtml);
+  console.log(`    Found ${mainEntries.length} entries on main page`);
+  allEntries.push(...mainEntries);
 
-  // Build census entries
-  const laws = rawEntries
-    .slice(0, limit ?? rawEntries.length)
-    .map((entry, idx) => {
-      const date = parseDRDate(entry.fecha);
-      const id = `do-ley-${entry.numero || idx}-${slugify(entry.titulo).substring(0, 30)}`;
+  const subPages = extractSubPages(mainHtml);
+  if (subPages.length > 0) {
+    console.log(`\n  Step 2: Following ${subPages.length} sub-pages...`);
+    for (const pageUrl of subPages) {
+      if (limit && allEntries.length >= limit) break;
+      process.stdout.write(`    ${pageUrl.replace(BASE_URL, '')}...`);
+      const html = await fetchPage(pageUrl);
+      if (html) {
+        const entries = parseLawIndex(html);
+        const newEntries = entries.filter(e => !allEntries.some(a => a.url === e.url));
+        allEntries.push(...newEntries);
+        console.log(` ${entries.length} entries (${newEntries.length} new)`);
+        const morePages = extractSubPages(html).filter(p => !subPages.includes(p));
+        subPages.push(...morePages);
+      } else { console.log(' failed'); }
+    }
+  }
 
-      return {
-        id,
-        title: entry.titulo,
-        identifier: entry.numero ? `Ley No. ${entry.numero}` : entry.titulo,
-        url: entry.downloadUrl,
-        status: 'in_force' as const,
-        category: 'act' as const,
-        classification: entry.downloadUrl ? 'ingestable' as const : 'inaccessible' as const,
-        ingested: false,
-        provision_count: 0,
-        ingestion_date: null as string | null,
-        issued_date: date,
-        gaceta: entry.gaceta,
-        document_id: entry.documentId,
-      };
-    });
+  const seenUrls = new Map<string, RawLawEntry>();
+  for (const entry of allEntries) {
+    const key = entry.url.toLowerCase();
+    if (!seenUrls.has(key)) seenUrls.set(key, entry);
+  }
 
-  const ingestable = laws.filter(l => l.classification === 'ingestable').length;
-  const inaccessible = laws.filter(l => l.classification === 'inaccessible').length;
+  const unique = Array.from(seenUrls.values());
+  const finalEntries = limit ? unique.slice(0, limit) : unique;
+
+  const laws = finalEntries.map((entry) => ({
+    id: `sv-${slugify(entry.title)}`,
+    title: entry.title,
+    identifier: entry.title,
+    url: entry.url,
+    status: 'in_force' as const,
+    category: 'act' as const,
+    classification: 'ingestable' as const,
+    ingested: false,
+    provision_count: 0,
+    ingestion_date: null as string | null,
+    issued_date: entry.year ? `${entry.year}-01-01` : '',
+    norm_type: entry.normType,
+  }));
+
+  const normTypeCounts: Record<string, number> = {};
+  for (const entry of finalEntries) {
+    normTypeCounts[entry.normType] = (normTypeCounts[entry.normType] || 0) + 1;
+  }
 
   const census = {
-    schema_version: '2.0',
-    jurisdiction: 'DO',
-    jurisdiction_name: 'Dominican Republic',
-    portal: 'consultoria.gov.do',
+    schema_version: '2.0', jurisdiction: 'SV', jurisdiction_name: 'El Salvador',
+    portal: 'el-salvador.justia.com', portal_url: LAWS_INDEX,
     census_date: new Date().toISOString().split('T')[0],
-    agent: 'dominican-law-mcp/census.ts',
-    summary: {
-      total_laws: laws.length,
-      ingestable,
-      ocr_needed: 0,
-      inaccessible,
-      excluded: 0,
-    },
+    agent: 'salvadoran-law-mcp/census.ts',
+    summary: { total_laws: laws.length, ingestable: laws.length, ocr_needed: 0, inaccessible: 0, excluded: 0 },
+    breakdown: { by_norm_type: normTypeCounts },
     laws,
   };
 
@@ -283,12 +266,13 @@ async function main(): Promise<void> {
   console.log('CENSUS COMPLETE');
   console.log('==================================================');
   console.log(`  Total laws discovered:  ${laws.length}`);
-  console.log(`  Ingestable:             ${ingestable}`);
-  console.log(`  Inaccessible:           ${inaccessible}`);
+  console.log(`  All ingestable (HTML):  ${laws.length}`);
+  console.log('');
+  console.log('  By norm type:');
+  for (const [type, count] of Object.entries(normTypeCounts).sort((a, b) => b[1] - a[1])) {
+    console.log(`    ${type}: ${count}`);
+  }
   console.log(`\n  Output: ${CENSUS_PATH}`);
 }
 
-main().catch(error => {
-  console.error('Fatal error:', error);
-  process.exit(1);
-});
+main().catch(error => { console.error('Fatal error:', error); process.exit(1); });

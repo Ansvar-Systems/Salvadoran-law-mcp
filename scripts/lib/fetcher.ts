@@ -1,13 +1,13 @@
 /**
- * Rate-limited HTTP client for Dominican Republic Law (consultoria.gov.do)
+ * Rate-limited HTTP client for Salvadoran Law (el-salvador.justia.com)
  *
- * - 500ms minimum delay between requests (be respectful to government servers)
+ * - 500ms minimum delay between requests
  * - User-Agent header identifying the MCP
- * - Fetches structured AKN HTML from consultoria.gov.do
- * - No auth needed (Government Open Data)
+ * - Fetches Justia HTML law pages
+ * - No auth needed (public law database)
  */
 
-const USER_AGENT = 'dominican-law-mcp/1.0 (https://github.com/Ansvar-Systems/dominican-law-mcp; hello@ansvar.ai)';
+const USER_AGENT = 'salvadoran-law-mcp/1.0 (https://github.com/Ansvar-Systems/salvadoran-law-mcp; hello@ansvar.ai)';
 const MIN_DELAY_MS = 500;
 
 let lastRequestTime = 0;
@@ -28,10 +28,6 @@ export interface FetchResult {
   url: string;
 }
 
-/**
- * Fetch a URL with rate limiting and proper headers.
- * Retries up to 3 times on 429/5xx errors with exponential backoff.
- */
 export async function fetchWithRateLimit(url: string, maxRetries = 3): Promise<FetchResult> {
   await rateLimit();
 
@@ -40,6 +36,7 @@ export async function fetchWithRateLimit(url: string, maxRetries = 3): Promise<F
       headers: {
         'User-Agent': USER_AGENT,
         'Accept': 'text/html, */*',
+        'Accept-Language': 'es,en;q=0.5',
       },
       redirect: 'follow',
     });
