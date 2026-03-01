@@ -1,13 +1,13 @@
 #!/usr/bin/env tsx
 /**
- * Dominican Law MCP — Data Freshness Checker
+ * Salvadoran Law MCP -- Data Freshness Checker
  *
  * Checks whether the local database is stale or missing expected legislation.
  *
  * Detection strategy:
- * 1. Database age — flags if build_date > MAX_AGE days old
- * 2. Document count — compares DB rows against census.json expected count
- * 3. Source portal — verifies the official legal portal is reachable
+ * 1. Database age -- flags if build_date > MAX_AGE days old
+ * 2. Document count -- compares DB rows against census.json expected count
+ * 3. Source portal -- verifies the official legal portal is reachable
  *
  * Exit codes:
  *   0 = database is fresh, no updates detected
@@ -24,8 +24,8 @@ const DB_PATH = resolve(__dirname, '../data/database.db');
 const CENSUS_PATH = resolve(__dirname, '../data/census.json');
 
 const MAX_DB_AGE_DAYS = Number(process.env['MAX_DB_AGE_DAYS'] ?? '90');
-const PORTAL_URL = 'http://consultoria.gov.do';
-const PORTAL_NAME = 'Dominican Republic Law';
+const PORTAL_URL = 'https://el-salvador.justia.com';
+const PORTAL_NAME = 'Salvadoran Law (Justia)';
 
 interface CensusSummary {
   total_laws?: number;
@@ -47,7 +47,7 @@ async function checkPortal(url: string): Promise<boolean> {
     const res = await fetch(url, {
       method: 'HEAD',
       signal: controller.signal,
-      headers: { 'User-Agent': '@ansvar/dominican-law-mcp/1.0 (data-freshness-check)' },
+      headers: { 'User-Agent': '@ansvar/salvadoran-law-mcp/1.0 (data-freshness-check)' },
     });
     clearTimeout(timeout);
     return res.ok || res.status === 301 || res.status === 302 || res.status === 403;
@@ -57,7 +57,7 @@ async function checkPortal(url: string): Promise<boolean> {
 }
 
 async function main(): Promise<void> {
-  console.log('Dominican Law MCP — Data Freshness Check');
+  console.log('Salvadoran Law MCP -- Data Freshness Check');
   console.log(`Portal: ${PORTAL_NAME} (${PORTAL_URL})`);
   console.log('');
 
@@ -90,7 +90,7 @@ async function main(): Promise<void> {
       console.log(`OK: Database is ${age} days old (threshold: ${MAX_DB_AGE_DAYS} days)`);
     }
   } else {
-    console.log('WARN: No build_date in db_metadata — cannot assess age');
+    console.log('WARN: No build_date in db_metadata -- cannot assess age');
   }
 
   // --- 3. Document count check ---
@@ -127,7 +127,7 @@ async function main(): Promise<void> {
       console.log('WARN: Could not parse census.json');
     }
   } else {
-    console.log('INFO: No census.json — skipping count comparison');
+    console.log('INFO: No census.json -- skipping count comparison');
   }
 
   db.close();
@@ -139,16 +139,16 @@ async function main(): Promise<void> {
   if (portalOk) {
     console.log(`OK: ${PORTAL_NAME} is reachable`);
   } else {
-    console.log(`WARN: ${PORTAL_NAME} is unreachable — manual check recommended`);
+    console.log(`WARN: ${PORTAL_NAME} is unreachable -- manual check recommended`);
   }
 
   // --- Result ---
   console.log('');
   if (updatesNeeded) {
-    console.log('RESULT: Updates detected — re-ingestion recommended');
+    console.log('RESULT: Updates detected -- re-ingestion recommended');
     process.exit(1);
   } else {
-    console.log('RESULT: Database appears current — no updates needed');
+    console.log('RESULT: Database appears current -- no updates needed');
     process.exit(0);
   }
 }

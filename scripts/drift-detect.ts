@@ -1,8 +1,8 @@
 #!/usr/bin/env tsx
 /**
- * Drift detection for Dominican Republic Law MCP.
+ * Drift detection for Salvadoran Law MCP.
  *
- * Checks if upstream Dominican Republic Law content has changed since last ingestion.
+ * Checks if upstream Salvadoran law content has changed since last ingestion.
  * Uses the golden-hashes.json fixture to verify content integrity.
  */
 
@@ -27,8 +27,8 @@ interface HashFixture {
 }
 
 async function main(): Promise<void> {
-  console.log('Dominican Republic Law MCP — Drift Detection');
-  console.log('================================\n');
+  console.log('Salvadoran Law MCP -- Drift Detection');
+  console.log('=====================================\n');
 
   const fixture: HashFixture = JSON.parse(readFileSync(hashesPath, 'utf-8'));
   console.log(`Checking ${fixture.provisions.length} provisions...\n`);
@@ -46,7 +46,7 @@ async function main(): Promise<void> {
 
     try {
       const response = await fetch(hash.upstream_url, {
-        headers: { 'User-Agent': 'dominican-law-mcp/1.0 drift-detect' },
+        headers: { 'User-Agent': 'salvadoran-law-mcp/1.0 drift-detect' },
       });
 
       if (response.status !== 200) {

@@ -1,6 +1,6 @@
 #!/usr/bin/env tsx
 /**
- * Database builder for El Salvador Law MCP server.
+ * Database builder for Salvadoran Law MCP server.
  *
  * Builds the SQLite database from seed JSON files in data/seed/.
  * Follows the Switzerland Law MCP reference pattern.
@@ -302,7 +302,7 @@ function extractEuReferences(text: string): ExtractedEUReference[] {
 }
 
 function buildDatabase(): void {
-  console.log('Building El Salvador Law MCP database...\n');
+  console.log('Building Salvadoran Law MCP database...\n');
 
   if (fs.existsSync(DB_PATH)) {
     fs.unlinkSync(DB_PATH);
@@ -349,7 +349,7 @@ function buildDatabase(): void {
   `);
 
   if (!fs.existsSync(SEED_DIR)) {
-    console.log(`No seed directory at ${SEED_DIR} — creating empty database.`);
+    console.log(`No seed directory at ${SEED_DIR} -- creating empty database.`);
     db.close();
     return;
   }
