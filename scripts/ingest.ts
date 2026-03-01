@@ -1,37 +1,37 @@
 #!/usr/bin/env tsx
 /**
- * Dominican Republic Law MCP -- Census-Driven Ingestion Pipeline
+ * Salvadoran Law MCP -- Census-Driven Ingestion Pipeline
  *
- * Reads data/census.json and fetches + parses every ingestable Act
- * from consultoria.gov.do (PDF downloads).
+ * Reads data/census.json and fetches + parses every ingestable law
+ * from el-salvador.justia.com (HTML full text).
  *
  * Pipeline per law:
- *   1. Download PDF from consultoria.gov.do/Consulta/Home/FileManagement
- *   2. Extract text using pdftotext (poppler-utils)
- *   3. Parse articles, definitions, chapter structure
- *   4. Write seed JSON for build-db.ts
+ *   1. Fetch HTML page for the individual law
+ *   2. Parse articles, definitions, chapter structure (no PDF extraction)
+ *   3. Write seed JSON for build-db.ts
  *
  * Features:
- *   - Resume support: skips Acts that already have a seed JSON file
+ *   - Resume support: skips laws that already have a seed JSON file
  *   - Census update: writes provision counts + ingestion dates back to census.json
- *   - Rate limiting: 500ms minimum between requests
- *   - Session management: obtains CSRF token for authenticated downloads
+ *   - Rate limiting: 300ms minimum between requests
+ *   - Checkpoint: saves census every 50 laws
  *
  * Usage:
  *   npm run ingest                    # Full census-driven ingestion
- *   npm run ingest -- --limit 5       # Test with 5 acts
- *   npm run ingest -- --skip-fetch    # Reuse cached PDFs (re-parse only)
+ *   npm run ingest -- --limit 5       # Test with 5 laws
  *   npm run ingest -- --force         # Re-ingest even if seed exists
+ *   npm run ingest -- --resume        # (default) Skip already-ingested laws
  *
- * Data source: consultoria.gov.do (Consultoría Jurídica del Poder Ejecutivo)
- * Format: PDF (text extracted via pdftotext)
+ * Data source: el-salvador.justia.com
+ * Format: HTML (parsed directly, no PDF extraction needed)
  * License: Government Open Data
  */
 
 import * as fs from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
-import { parseDominicanLawPdf, type ActIndexEntry, type ParsedAct } from './lib/parser.js';
+import { parseSVLawHtml, type ActIndexEntry, type ParsedAct } from './lib/parser.js';
+import { fetchWithRateLimit } from './lib/fetcher.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -39,10 +39,6 @@ const __dirname = path.dirname(__filename);
 const SOURCE_DIR = path.resolve(__dirname, '../data/source');
 const SEED_DIR = path.resolve(__dirname, '../data/seed');
 const CENSUS_PATH = path.resolve(__dirname, '../data/census.json');
-
-const BASE_URL = 'https://www.consultoria.gov.do';
-const USER_AGENT = 'dominican-law-mcp/1.0 (https://github.com/Ansvar-Systems/dominican-law-mcp; hello@ansvar.ai)';
-const MIN_DELAY_MS = 200;
 
 /* ---------- Types ---------- */
 
@@ -52,14 +48,13 @@ interface CensusLawEntry {
   identifier: string;
   url: string;
   status: 'in_force' | 'amended' | 'repealed';
-  category: 'act';
+  category: string;
   classification: 'ingestable' | 'excluded' | 'inaccessible';
   ingested: boolean;
   provision_count: number;
   ingestion_date: string | null;
   issued_date?: string;
-  gaceta?: string;
-  document_id?: string;
+  portal_slug?: string;
 }
 
 interface CensusFile {
@@ -81,24 +76,21 @@ interface CensusFile {
 
 /* ---------- Helpers ---------- */
 
-function parseArgs(): { limit: number | null; skipFetch: boolean; force: boolean } {
+function parseArgs(): { limit: number | null; force: boolean } {
   const args = process.argv.slice(2);
   let limit: number | null = null;
-  let skipFetch = false;
   let force = false;
 
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--limit' && args[i + 1]) {
       limit = parseInt(args[i + 1], 10);
       i++;
-    } else if (args[i] === '--skip-fetch') {
-      skipFetch = true;
     } else if (args[i] === '--force') {
       force = true;
     }
   }
 
-  return { limit, skipFetch, force };
+  return { limit, force };
 }
 
 function censusToActEntry(law: CensusLawEntry): ActIndexEntry {
@@ -116,87 +108,42 @@ function censusToActEntry(law: CensusLawEntry): ActIndexEntry {
   };
 }
 
-/**
- * Get session cookies from the main page for authenticated downloads.
- */
-async function getSessionCookies(): Promise<string> {
-  const response = await fetch(`${BASE_URL}/consulta/`, {
-    headers: { 'User-Agent': USER_AGENT, 'Accept': 'text/html' },
-    redirect: 'follow',
-  });
-
-  const setCookies = response.headers.getSetCookie?.() ?? [];
-  return setCookies.map(c => c.split(';')[0]).join('; ');
-}
-
-/**
- * Download a PDF file with rate limiting and session cookies.
- */
-async function downloadPdf(url: string, outputPath: string, cookies: string): Promise<boolean> {
-  await new Promise(resolve => setTimeout(resolve, MIN_DELAY_MS));
-
+async function fetchLawHtml(url: string): Promise<{ ok: boolean; html: string; size: number }> {
   try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 60000); // 60s timeout
+    const result = await fetchWithRateLimit(url);
 
-    const response = await fetch(url, {
-      headers: {
-        'User-Agent': USER_AGENT,
-        'Accept': 'application/pdf, */*',
-        'Cookie': cookies,
-        'Referer': `${BASE_URL}/consulta/`,
-      },
-      redirect: 'follow',
-      signal: controller.signal,
-    });
-
-    clearTimeout(timeout);
-
-    if (response.status !== 200) {
-      console.log(` HTTP ${response.status}`);
-      return false;
+    if (result.status !== 200) {
+      console.log(` HTTP ${result.status}`);
+      return { ok: false, html: '', size: 0 };
     }
 
-    // Read body with timeout
-    const bodyController = new AbortController();
-    const bodyTimeout = setTimeout(() => bodyController.abort(), 60000); // 60s for body
-    let buffer: Buffer;
-    try {
-      buffer = Buffer.from(await response.arrayBuffer());
-    } finally {
-      clearTimeout(bodyTimeout);
+    if (result.body.length < 200) {
+      console.log(' Response too small');
+      return { ok: false, html: '', size: 0 };
     }
 
-    // Verify it's actually a PDF
-    if (buffer.length < 100 || !buffer.subarray(0, 5).toString().startsWith('%PDF')) {
-      console.log(' Not a PDF');
-      return false;
-    }
-
-    fs.writeFileSync(outputPath, buffer);
-    return true;
+    return { ok: true, html: result.body, size: result.body.length };
   } catch (err) {
-    console.log(` Error: ${err instanceof Error ? err.message : String(err)}`);
-    return false;
+    const msg = err instanceof Error ? err.message : String(err);
+    console.log(` Error: ${msg}`);
+    return { ok: false, html: '', size: 0 };
   }
 }
 
 /* ---------- Main ---------- */
 
 async function main(): Promise<void> {
-  const { limit, skipFetch, force } = parseArgs();
+  const { limit, force } = parseArgs();
 
-  console.log('Dominican Republic Law MCP -- Ingestion Pipeline (Census-Driven)');
-  console.log('=================================================================\n');
-  console.log('  Source: consultoria.gov.do (Consultoría Jurídica del Poder Ejecutivo)');
-  console.log('  Format: PDF (text extracted via pdftotext)');
+  console.log('Salvadoran Law MCP -- Ingestion Pipeline (Census-Driven)');
+  console.log('========================================================\n');
+  console.log('  Source: el-salvador.justia.com');
+  console.log('  Format: HTML (parsed directly, no PDF extraction)');
   console.log('  License: Government Open Data');
 
   if (limit) console.log(`  --limit ${limit}`);
-  if (skipFetch) console.log(`  --skip-fetch`);
   if (force) console.log(`  --force (re-ingest all)`);
 
-  // Load census
   if (!fs.existsSync(CENSUS_PATH)) {
     console.error(`\nERROR: Census file not found at ${CENSUS_PATH}`);
     console.error('Run "npx tsx scripts/census.ts" first.');
@@ -208,16 +155,10 @@ async function main(): Promise<void> {
   const acts = limit ? ingestable.slice(0, limit) : ingestable;
 
   console.log(`\n  Census: ${census.summary.total_laws} total, ${ingestable.length} ingestable`);
-  console.log(`  Processing: ${acts.length} acts\n`);
+  console.log(`  Processing: ${acts.length} laws\n`);
 
   fs.mkdirSync(SOURCE_DIR, { recursive: true });
   fs.mkdirSync(SEED_DIR, { recursive: true });
-
-  // Get session cookies for downloads
-  process.stdout.write('  Obtaining session cookies... ');
-  let cookies = await getSessionCookies();
-  console.log('OK');
-  console.log('');
 
   let processed = 0;
   let ingested = 0;
@@ -236,10 +177,9 @@ async function main(): Promise<void> {
 
   for (const law of acts) {
     const act = censusToActEntry(law);
-    const sourceFile = path.join(SOURCE_DIR, `${act.id}.pdf`);
+    const sourceFile = path.join(SOURCE_DIR, `${act.id}.html`);
     const seedFile = path.join(SEED_DIR, `${act.id}.json`);
 
-    // Resume support
     if (!force && fs.existsSync(seedFile)) {
       try {
         const existing = JSON.parse(fs.readFileSync(seedFile, 'utf-8')) as ParsedAct;
@@ -265,36 +205,30 @@ async function main(): Promise<void> {
     }
 
     try {
-      // Step 1: Download PDF
-      if (!fs.existsSync(sourceFile) || force) {
-        if (skipFetch) {
-          console.log(`  [${processed + 1}/${acts.length}] No cached PDF for ${act.id}, skipping`);
-          results.push({ act: act.shortName, provisions: 0, definitions: 0, status: 'no-cache' });
-          failed++;
-          processed++;
-          continue;
-        }
+      let html: string;
 
-        process.stdout.write(`  [${processed + 1}/${acts.length}] Downloading ${act.id}...`);
-        const ok = await downloadPdf(act.url, sourceFile, cookies);
-        if (!ok) {
+      if (fs.existsSync(sourceFile) && !force) {
+        html = fs.readFileSync(sourceFile, 'utf-8');
+        const size = Buffer.byteLength(html);
+        console.log(`  [${processed + 1}/${acts.length}] Using cached ${act.id} (${(size / 1024).toFixed(0)} KB)`);
+      } else {
+        process.stdout.write(`  [${processed + 1}/${acts.length}] Fetching ${act.id}...`);
+        const result = await fetchLawHtml(act.url);
+        if (!result.ok) {
           const entry = censusMap.get(law.id);
           if (entry) entry.classification = 'inaccessible';
-          results.push({ act: act.shortName, provisions: 0, definitions: 0, status: 'download-failed' });
+          results.push({ act: act.shortName, provisions: 0, definitions: 0, status: 'fetch-failed' });
           failed++;
           processed++;
           continue;
         }
 
-        const size = fs.statSync(sourceFile).size;
-        console.log(` OK (${(size / 1024).toFixed(0)} KB)`);
-      } else {
-        const size = fs.statSync(sourceFile).size;
-        console.log(`  [${processed + 1}/${acts.length}] Using cached ${act.id} (${(size / 1024).toFixed(0)} KB)`);
+        html = result.html;
+        fs.writeFileSync(sourceFile, html, 'utf-8');
+        console.log(` OK (${(result.size / 1024).toFixed(0)} KB)`);
       }
 
-      // Step 2: Parse PDF
-      const parsed = parseDominicanLawPdf(sourceFile, act);
+      const parsed = parseSVLawHtml(html, act);
       fs.writeFileSync(seedFile, JSON.stringify(parsed, null, 2));
       totalProvisions += parsed.provisions.length;
       totalDefinitions += parsed.definitions.length;
@@ -327,16 +261,6 @@ async function main(): Promise<void> {
       writeCensus(census, censusMap);
       console.log(`  [checkpoint] Census updated at ${processed}/${acts.length}`);
     }
-
-    // Refresh session cookies every 500 laws to prevent expiry
-    if (processed % 500 === 0 && processed > 0) {
-      try {
-        cookies = await getSessionCookies();
-        console.log('  [session] Cookies refreshed');
-      } catch {
-        console.log('  [session] Cookie refresh failed, continuing with existing cookies');
-      }
-    }
   }
 
   writeCensus(census, censusMap);
@@ -344,7 +268,7 @@ async function main(): Promise<void> {
   console.log(`\n${'='.repeat(70)}`);
   console.log('Ingestion Report');
   console.log('='.repeat(70));
-  console.log(`\n  Source:      consultoria.gov.do (PDF extraction)`);
+  console.log(`\n  Source:      el-salvador.justia.com (HTML)`);
   console.log(`  Processed:   ${processed}`);
   console.log(`  New:         ${ingested}`);
   console.log(`  Resumed:     ${skipped}`);
@@ -352,9 +276,9 @@ async function main(): Promise<void> {
   console.log(`  Total provisions:  ${totalProvisions}`);
   console.log(`  Total definitions: ${totalDefinitions}`);
 
-  const failures = results.filter(r => r.status.startsWith('download') || r.status.startsWith('ERROR') || r.status === 'no-cache');
+  const failures = results.filter(r => r.status.startsWith('fetch') || r.status.startsWith('ERROR'));
   if (failures.length > 0) {
-    console.log(`\n  Failed acts:`);
+    console.log(`\n  Failed laws:`);
     for (const f of failures.slice(0, 30)) {
       console.log(`    ${f.act}: ${f.status}`);
     }
@@ -365,7 +289,7 @@ async function main(): Promise<void> {
 
   const zeroProv = results.filter(r => r.provisions === 0 && r.status === 'OK');
   if (zeroProv.length > 0) {
-    console.log(`\n  Zero-provision acts (${zeroProv.length}):`);
+    console.log(`\n  Zero-provision laws (${zeroProv.length}):`);
     for (const z of zeroProv.slice(0, 20)) {
       console.log(`    ${z.act}`);
     }

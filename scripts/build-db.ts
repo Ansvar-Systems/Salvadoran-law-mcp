@@ -1,6 +1,6 @@
 #!/usr/bin/env tsx
 /**
- * Database builder for Dominican Republic Law MCP server.
+ * Database builder for Salvadoran Law MCP server.
  *
  * Builds the SQLite database from seed JSON files in data/seed/.
  * Follows the Switzerland Law MCP reference pattern.
@@ -302,7 +302,7 @@ function extractEuReferences(text: string): ExtractedEUReference[] {
 }
 
 function buildDatabase(): void {
-  console.log('Building Dominican Republic Law MCP database...\n');
+  console.log('Building Salvadoran Law MCP database...\n');
 
   if (fs.existsSync(DB_PATH)) {
     fs.unlinkSync(DB_PATH);
@@ -349,7 +349,7 @@ function buildDatabase(): void {
   `);
 
   if (!fs.existsSync(SEED_DIR)) {
-    console.log(`No seed directory at ${SEED_DIR} — creating empty database.`);
+    console.log(`No seed directory at ${SEED_DIR} -- creating empty database.`);
     db.close();
     return;
   }
@@ -408,7 +408,7 @@ function buildDatabase(): void {
 
               const euInsert = insertEuDocument.run(
                 ref.euDocumentId, ref.type, ref.year, ref.number, ref.community,
-                shortName, shortName, eurLexUrl, 'Auto-extracted from Dominican statute text',
+                shortName, shortName, eurLexUrl, 'Auto-extracted from Salvadoran statute text',
               );
               if (euInsert.changes > 0) totalEuDocuments++;
 
@@ -449,9 +449,9 @@ function buildDatabase(): void {
     insertMeta.run('schema_version', '2');
     insertMeta.run('built_at', new Date().toISOString());
     insertMeta.run('builder', 'build-db.ts');
-    insertMeta.run('jurisdiction', 'DO');
-    insertMeta.run('source', 'consultoria.gov.do');
-    insertMeta.run('licence', 'Government Open Data');
+    insertMeta.run('jurisdiction', 'SV');
+    insertMeta.run('source', 'el-salvador.justia.com');
+    insertMeta.run('licence', 'Justia (public access)');
   });
   writeMeta();
 

@@ -1,14 +1,16 @@
 /**
- * Rate-limited HTTP client for Dominican Republic Law (consultoria.gov.do)
+ * Rate-limited HTTP client for Salvadoran Law
+ * (el-salvador.justia.com)
  *
- * - 500ms minimum delay between requests (be respectful to government servers)
+ * - 300ms minimum delay between requests
  * - User-Agent header identifying the MCP
- * - Fetches structured AKN HTML from consultoria.gov.do
- * - No auth needed (Government Open Data)
+ * - Fetches HTML pages -- no auth needed (public portals)
+ * - Retries on 429/5xx with exponential backoff
  */
 
-const USER_AGENT = 'dominican-law-mcp/1.0 (https://github.com/Ansvar-Systems/dominican-law-mcp; hello@ansvar.ai)';
-const MIN_DELAY_MS = 500;
+const USER_AGENT =
+  'salvadoran-law-mcp/1.0 (https://github.com/Ansvar-Systems/Salvadoran-law-mcp; hello@ansvar.ai)';
+const MIN_DELAY_MS = 300;
 
 let lastRequestTime = 0;
 
@@ -36,30 +38,49 @@ export async function fetchWithRateLimit(url: string, maxRetries = 3): Promise<F
   await rateLimit();
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    const response = await fetch(url, {
-      headers: {
-        'User-Agent': USER_AGENT,
-        'Accept': 'text/html, */*',
-      },
-      redirect: 'follow',
-    });
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 30000);
 
-    if (response.status === 429 || response.status >= 500) {
+    try {
+      const response = await fetch(url, {
+        headers: {
+          'User-Agent': USER_AGENT,
+          'Accept': 'text/html, */*',
+          'Accept-Language': 'es-SV,es;q=0.9,en;q=0.5',
+        },
+        redirect: 'follow',
+        signal: controller.signal,
+      });
+
+      clearTimeout(timeout);
+
+      if (response.status === 429 || response.status >= 500) {
+        if (attempt < maxRetries) {
+          const backoff = Math.pow(2, attempt + 1) * 1000;
+          console.log(`  HTTP ${response.status} for ${url}, retrying in ${backoff}ms...`);
+          await new Promise(resolve => setTimeout(resolve, backoff));
+          continue;
+        }
+      }
+
+      const body = await response.text();
+      return {
+        status: response.status,
+        body,
+        contentType: response.headers.get('content-type') ?? '',
+        url: response.url,
+      };
+    } catch (err) {
+      clearTimeout(timeout);
       if (attempt < maxRetries) {
         const backoff = Math.pow(2, attempt + 1) * 1000;
-        console.log(`  HTTP ${response.status} for ${url}, retrying in ${backoff}ms...`);
+        const msg = err instanceof Error ? err.message : String(err);
+        console.log(`  Fetch error for ${url}: ${msg}, retrying in ${backoff}ms...`);
         await new Promise(resolve => setTimeout(resolve, backoff));
         continue;
       }
+      throw err;
     }
-
-    const body = await response.text();
-    return {
-      status: response.status,
-      body,
-      contentType: response.headers.get('content-type') ?? '',
-      url: response.url,
-    };
   }
 
   throw new Error(`Failed to fetch ${url} after ${maxRetries} retries`);
