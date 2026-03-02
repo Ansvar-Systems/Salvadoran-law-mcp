@@ -1,0 +1,7 @@
+# Ingestion and development scripts — not needed for Vercel API deployment
+scripts/
+__tests__/
+fixtures/
+.github/
+*.md
+!README.md
