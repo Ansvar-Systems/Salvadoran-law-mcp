@@ -1,5 +1,5 @@
 /**
- * Statute ID resolution for Dominican Republic Law MCP.
+ * Statute ID resolution for Salvadoran Law MCP.
  *
  * Resolves fuzzy document references (titles, Act names) to database document IDs.
  */
